@@ -1,0 +1,24 @@
+{
+  "language": "en",
+  "transcript": "Good morning everyone. Let's begin the quarterly review meeting. First item on the agenda is the budget allocation for Q2.",
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 1.8,
+      "speaker": "Speaker 1",
+      "text": "Good morning everyone."
+    },
+    {
+      "start": 1.8,
+      "end": 4.2,
+      "speaker": "Speaker 1",
+      "text": "Let's begin the quarterly review meeting."
+    },
+    {
+      "start": 4.2,
+      "end": 7.5,
+      "speaker": "Speaker 1",
+      "text": "First item on the agenda is the budget allocation for Q2."
+    }
+  ]
+}

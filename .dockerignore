@@ -1,0 +1,11 @@
+__pycache__
+*.pyc
+.git
+.env
+test_corpus/*.wav
+test_corpus/*.mp3
+test_corpus/*.m4a
+test_corpus/*.flac
+test_corpus/*.ogg
+*.egg-info
+.venv

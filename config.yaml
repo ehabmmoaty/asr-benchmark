@@ -1,0 +1,62 @@
+models:
+  vibevoice_asr:
+    hub_id: "microsoft/VibeVoice-ASR"
+    class: "VibeVoiceASRModel"
+    enabled: true
+    gpu_memory_gb: 20
+    supports_context: true
+    supports_diarization: true
+    max_audio_minutes: 60
+
+  whisper_large_v3:
+    hub_id: "openai/whisper-large-v3"
+    class: "WhisperHFModel"
+    enabled: true
+    gpu_memory_gb: 4
+    supports_context: true
+    supports_diarization: false
+    max_audio_minutes: 30
+
+  whisper_large_v3_turbo:
+    hub_id: "openai/whisper-large-v3-turbo"
+    class: "WhisperHFModel"
+    enabled: true
+    gpu_memory_gb: 3
+    supports_context: true
+    supports_diarization: false
+    max_audio_minutes: 30
+
+  azure_speech:
+    hub_id: "azure-speech"
+    class: "AzureSpeechModel"
+    type: "api"
+    enabled: true
+    requires_key: true
+    region: "uaenorth"
+    supports_context: true
+    supports_diarization: true
+    languages: ["ar-AE", "ar-SA", "en-US"]
+
+  qwen3_asr:
+    hub_id: "Qwen/Qwen3-ASR-1.7B"
+    class: "Qwen3ASRModel"
+    enabled: true
+    gpu_memory_gb: 4
+    supports_context: true
+    supports_diarization: false
+    max_audio_minutes: 30
+    package: "qwen-asr"
+
+  xeus:
+    hub_id: "espnet/xeus"
+    class: "XEUSModel"
+    enabled: true
+    gpu_memory_gb: 3
+    supports_context: false
+    supports_diarization: false
+    type: "speech_encoder"
+    note: "Pre-trained encoder only. Requires fine-tuned checkpoint for text output."
+
+azure:
+  region: "uaenorth"
+  # API key provided via environment variable AZURE_SPEECH_KEY
