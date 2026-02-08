@@ -8,11 +8,17 @@ from __future__ import annotations
 
 import os
 import sys
+import io
 import json
 import time
+import hashlib
 import tempfile
 import logging
+from datetime import datetime
 from pathlib import Path
+
+import numpy as np
+import soundfile as sf
 
 import streamlit as st
 import pandas as pd
@@ -161,6 +167,12 @@ def init_session():
         st.session_state.results = []
     if "batch_results" not in st.session_state:
         st.session_state.batch_results = []
+    if "live_recordings" not in st.session_state:
+        st.session_state.live_recordings = []
+    if "live_session_start" not in st.session_state:
+        st.session_state.live_session_start = None
+    if "live_session_id" not in st.session_state:
+        st.session_state.live_session_id = None
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +188,7 @@ def render_sidebar(config: dict) -> dict:
     # Mode selection
     settings["mode"] = st.sidebar.radio(
         "Mode",
-        ["Single File Comparison", "Batch Benchmark", "Results Dashboard"],
+        ["Single File Comparison", "Batch Benchmark", "Live Recording", "Results Dashboard"],
         index=0,
     )
 
@@ -797,6 +809,370 @@ def render_batch_results(all_metrics: list[MetricsResult]):
 
 
 # ---------------------------------------------------------------------------
+# Live Recording Mode
+# ---------------------------------------------------------------------------
+
+
+def run_live_recording_mode(config: dict, settings: dict):
+    """Live mic recording with side-by-side model transcription and session saving."""
+    st.header("Live Recording & Transcription")
+
+    # Session controls
+    _render_session_controls()
+
+    st.markdown("---")
+
+    # Mic input
+    audio_bytes = st.audio_input(
+        "Click to record, click again to stop (mute/unmute)",
+        key="live_mic_input",
+    )
+
+    # Process new recording
+    if audio_bytes is not None:
+        _process_live_recording(audio_bytes, config, settings)
+
+    # Session log
+    st.markdown("---")
+    _render_session_log()
+
+    # Export
+    _render_session_export(settings)
+
+
+def _render_session_controls():
+    """Session status bar and new-session button."""
+    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+
+    with col1:
+        if st.session_state.live_session_start:
+            elapsed = datetime.now() - st.session_state.live_session_start
+            minutes, seconds = divmod(int(elapsed.total_seconds()), 60)
+            hours, minutes = divmod(minutes, 60)
+            st.metric("Session Duration", f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+        else:
+            st.metric("Session Duration", "00:00:00")
+
+    with col2:
+        st.metric("Recordings", len(st.session_state.live_recordings))
+
+    with col3:
+        total_audio = sum(r.get("duration", 0) for r in st.session_state.live_recordings)
+        st.metric("Total Audio", f"{total_audio:.1f}s")
+
+    with col4:
+        if st.button("New Session", type="secondary"):
+            st.session_state.live_recordings = []
+            st.session_state.live_session_start = None
+            st.session_state.live_session_id = None
+            st.rerun()
+
+
+def _process_live_recording(audio_bytes, config: dict, settings: dict):
+    """Process a new recording through all selected models."""
+
+    # Initialize session on first recording
+    if st.session_state.live_session_start is None:
+        st.session_state.live_session_start = datetime.now()
+        st.session_state.live_session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Deduplicate: hash audio bytes so Streamlit reruns don't re-process
+    raw = audio_bytes.read()
+    audio_bytes.seek(0)
+    audio_hash = hashlib.md5(raw).hexdigest()
+
+    existing_hashes = {r.get("hash") for r in st.session_state.live_recordings}
+    if audio_hash in existing_hashes:
+        # Already processed — just show latest results
+        if st.session_state.live_recordings:
+            _render_latest_results(st.session_state.live_recordings[-1])
+        return
+
+    # Save to temp WAV
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        tmp.write(raw)
+        wav_path = tmp.name
+
+    # Get duration
+    try:
+        duration = get_audio_duration(wav_path)
+    except Exception as e:
+        st.error(f"Could not read recorded audio: {e}")
+        os.unlink(wav_path)
+        return
+
+    # Playback
+    st.audio(audio_bytes, format="audio/wav")
+    st.caption(f"Recording duration: {duration:.1f}s")
+
+    # Run models
+    selected = settings["selected_models"]
+    registry = get_model_registry(config)
+    results = []
+
+    if not selected:
+        st.warning("No models selected. Select models in the sidebar.")
+        os.unlink(wav_path)
+        return
+
+    progress = st.progress(0.0)
+    status = st.status("Transcribing recording...", expanded=True)
+    model_keys = list(selected.keys())
+
+    for i, key in enumerate(model_keys):
+        cfg = registry.get(key, {})
+        model_name = cfg.get("hub_id", key)
+        status.write(f"Loading {model_name}...")
+
+        try:
+            model = create_model(key, cfg, **settings)
+            model.load()
+
+            status.write(f"Transcribing with {model_name}...")
+            result = model.transcribe(
+                wav_path,
+                language=settings.get("language"),
+                context=settings.get("context") or None,
+            )
+            results.append(result)
+            model.unload()
+
+        except Exception as e:
+            results.append(
+                TranscriptionResult(text="", model_name=model_name, error=str(e))
+            )
+            logger.error("Live mode — model %s failed: %s", model_name, e)
+
+        progress.progress((i + 1) / len(model_keys))
+
+    status.update(label="Transcription complete!", state="complete")
+
+    # Store recording entry
+    recording_entry = {
+        "hash": audio_hash,
+        "index": len(st.session_state.live_recordings) + 1,
+        "timestamp": datetime.now().isoformat(),
+        "duration": duration,
+        "audio_bytes": raw,
+        "results": results,
+    }
+    st.session_state.live_recordings.append(recording_entry)
+
+    # Display results
+    _render_latest_results(recording_entry)
+
+    # Cleanup temp
+    try:
+        os.unlink(wav_path)
+    except OSError:
+        pass
+
+
+def _render_latest_results(recording_entry: dict):
+    """Side-by-side transcript columns for a recording."""
+    results = recording_entry.get("results", [])
+    valid = [r for r in results if not r.error]
+
+    if not valid:
+        if results:
+            st.error("All models failed for this recording.")
+            for r in results:
+                if r.error:
+                    st.caption(f"{r.model_name}: {r.error}")
+        return
+
+    st.subheader(f"Recording #{recording_entry['index']} Results")
+    render_comparison_table(results)
+
+    cols = st.columns(min(len(valid), 3))
+    for i, result in enumerate(valid):
+        render_transcript_column(result, cols[i % len(cols)])
+
+
+def _render_session_log():
+    """Expandable log of all recordings in the session."""
+    recordings = st.session_state.live_recordings
+
+    if not recordings:
+        st.info(
+            "No recordings yet. Click the microphone above to start. "
+            "Each recording is transcribed by all selected models."
+        )
+        return
+
+    st.subheader("Session Log")
+
+    cumulative = 0.0
+    for rec in recordings:
+        dur = rec.get("duration", 0)
+        start_t = cumulative
+        end_t = cumulative + dur
+        cumulative = end_t
+
+        best = next((r for r in rec.get("results", []) if not r.error), None)
+        preview = ""
+        if best:
+            preview = best.text[:100] + "..." if len(best.text) > 100 else best.text
+
+        with st.expander(
+            f"#{rec['index']}  [{start_t:.0f}s – {end_t:.0f}s]  "
+            f"({dur:.1f}s)  {preview}",
+            expanded=False,
+        ):
+            if rec.get("audio_bytes"):
+                st.audio(rec["audio_bytes"], format="audio/wav")
+
+            valid = [r for r in rec.get("results", []) if not r.error]
+            if valid:
+                log_cols = st.columns(min(len(valid), 3))
+                for i, result in enumerate(valid):
+                    with log_cols[i % len(log_cols)]:
+                        st.markdown(f"**{result.model_name}**")
+                        st.caption(f"Time: {result.processing_time_seconds:.1f}s")
+                        st.text(result.text[:300])
+
+
+def _render_session_export(settings: dict):
+    """Download buttons for session transcripts and audio."""
+    recordings = st.session_state.live_recordings
+    if not recordings:
+        return
+
+    st.markdown("---")
+    st.subheader("Export Session")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        session_data = _build_session_json(recordings, settings)
+        st.download_button(
+            "Download Transcripts (JSON)",
+            data=json.dumps(session_data, indent=2, ensure_ascii=False).encode("utf-8"),
+            file_name=f"live_session_{st.session_state.live_session_id or 'unnamed'}.json",
+            mime="application/json",
+        )
+
+    with col2:
+        concat_bytes = _concatenate_recordings_wav(recordings)
+        if concat_bytes:
+            st.download_button(
+                "Download Full Audio (WAV)",
+                data=concat_bytes,
+                file_name=f"live_session_{st.session_state.live_session_id or 'unnamed'}.wav",
+                mime="audio/wav",
+            )
+
+    with col3:
+        if st.button("Save Session to Disk"):
+            save_path = _save_session_to_disk(recordings, settings)
+            st.success(f"Session saved to: {save_path}")
+
+
+def _build_session_json(recordings: list, settings: dict) -> dict:
+    """Build JSON-serializable session data."""
+    session = {
+        "session_id": st.session_state.live_session_id,
+        "started_at": (
+            st.session_state.live_session_start.isoformat()
+            if st.session_state.live_session_start
+            else None
+        ),
+        "total_recordings": len(recordings),
+        "total_audio_seconds": sum(r.get("duration", 0) for r in recordings),
+        "language": settings.get("language"),
+        "context": settings.get("context", ""),
+        "recordings": [],
+    }
+
+    for rec in recordings:
+        entry = {
+            "index": rec["index"],
+            "timestamp": rec["timestamp"],
+            "duration_seconds": rec["duration"],
+            "transcripts": {},
+        }
+        for result in rec.get("results", []):
+            entry["transcripts"][result.model_name] = {
+                "text": result.text,
+                "processing_time_seconds": round(result.processing_time_seconds, 2),
+                "rtf": round(result.rtf, 4) if result.rtf else None,
+                "language_detected": result.language_detected,
+                "error": result.error,
+                "segments": [
+                    {
+                        "start": s.start,
+                        "end": s.end,
+                        "text": s.text,
+                        "speaker": s.speaker,
+                    }
+                    for s in result.segments
+                ],
+            }
+        session["recordings"].append(entry)
+
+    return session
+
+
+def _concatenate_recordings_wav(recordings: list) -> bytes | None:
+    """Concatenate all recordings into one WAV file."""
+    if not recordings:
+        return None
+
+    try:
+        import librosa as _lr
+
+        all_audio = []
+        for rec in recordings:
+            raw = rec.get("audio_bytes")
+            if raw:
+                audio_array, sr = sf.read(io.BytesIO(raw))
+                if sr != 16000:
+                    audio_array = _lr.resample(audio_array, orig_sr=sr, target_sr=16000)
+                if audio_array.ndim > 1:
+                    audio_array = audio_array.mean(axis=1)
+                all_audio.append(audio_array)
+
+        if not all_audio:
+            return None
+
+        concatenated = np.concatenate(all_audio)
+        buf = io.BytesIO()
+        sf.write(buf, concatenated, 16000, format="WAV", subtype="PCM_16")
+        return buf.getvalue()
+    except Exception as e:
+        logger.error("Failed to concatenate recordings: %s", e)
+        return None
+
+
+def _save_session_to_disk(recordings: list, settings: dict) -> str:
+    """Write session files to recordings/ directory."""
+    session_id = st.session_state.live_session_id or datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_dir = os.path.join(os.path.dirname(__file__), "recordings", f"session_{session_id}")
+    os.makedirs(base_dir, exist_ok=True)
+
+    # Individual WAVs
+    for rec in recordings:
+        raw = rec.get("audio_bytes")
+        if raw:
+            wav_name = f"recording_{rec['index']:03d}.wav"
+            with open(os.path.join(base_dir, wav_name), "wb") as f:
+                f.write(raw)
+
+    # Concatenated WAV
+    concat_bytes = _concatenate_recordings_wav(recordings)
+    if concat_bytes:
+        with open(os.path.join(base_dir, "full_session.wav"), "wb") as f:
+            f.write(concat_bytes)
+
+    # Metadata + transcripts JSON
+    session_data = _build_session_json(recordings, settings)
+    with open(os.path.join(base_dir, "session_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(session_data, f, indent=2, ensure_ascii=False)
+
+    return base_dir
+
+
+# ---------------------------------------------------------------------------
 # Results Dashboard Mode
 # ---------------------------------------------------------------------------
 
@@ -904,6 +1280,8 @@ def main():
         run_single_file_mode(config, settings)
     elif mode == "Batch Benchmark":
         run_batch_mode(config, settings)
+    elif mode == "Live Recording":
+        run_live_recording_mode(config, settings)
     elif mode == "Results Dashboard":
         run_dashboard_mode()
 

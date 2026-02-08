@@ -14,3 +14,4 @@ build/
 *.flac
 *.ogg
 !test_corpus/*.json
+recordings/
