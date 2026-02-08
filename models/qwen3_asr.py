@@ -53,10 +53,16 @@ class Qwen3ASRModel(ASRModel):
 
         logger.info("Loading Qwen3-ASR: %s", self.model_id)
 
-        device_map = self.device + ":0" if self.device == "cuda" else self.device
+        if self.device == "cuda" and torch.cuda.is_available():
+            device_map = "cuda:0"
+            dtype = torch.bfloat16
+        else:
+            self.device = "cpu"
+            device_map = "cpu"
+            dtype = torch.float32
 
         kwargs = dict(
-            dtype=torch.bfloat16,
+            dtype=dtype,
             device_map=device_map,
             max_inference_batch_size=32,
             max_new_tokens=4096,
@@ -65,7 +71,7 @@ class Qwen3ASRModel(ASRModel):
         if self.use_forced_aligner:
             kwargs["forced_aligner"] = self.forced_aligner_id
             kwargs["forced_aligner_kwargs"] = dict(
-                dtype=torch.bfloat16,
+                dtype=dtype,
                 device_map=device_map,
             )
 
