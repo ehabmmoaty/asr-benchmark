@@ -33,7 +33,7 @@ class Qwen3ASRModel(ASRModel):
         self,
         model_id: str = "Qwen/Qwen3-ASR-1.7B",
         device: str = "cuda",
-        use_forced_aligner: bool = True,
+        use_forced_aligner: bool = False,
         forced_aligner_id: str = "Qwen/Qwen3-ForcedAligner-0.6B",
     ):
         super().__init__(model_id, device)
@@ -65,7 +65,7 @@ class Qwen3ASRModel(ASRModel):
             dtype=dtype,
             device_map=device_map,
             max_inference_batch_size=32,
-            max_new_tokens=4096,
+            max_new_tokens=512,
         )
 
         if self.use_forced_aligner:

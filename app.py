@@ -150,7 +150,9 @@ def create_model(key: str, model_cfg: dict, **overrides) -> ASRModel:
         kwargs["api_key"] = overrides.get("azure_key", os.environ.get("AZURE_SPEECH_KEY", ""))
         kwargs["region"] = model_cfg.get("region", overrides.get("azure_region", "uaenorth"))
     else:
-        kwargs["device"] = overrides.get("device", "cuda")
+        import torch
+        default_device = "cuda" if torch.cuda.is_available() else "cpu"
+        kwargs["device"] = overrides.get("device", default_device)
 
     return cls(**kwargs)
 
