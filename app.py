@@ -824,6 +824,15 @@ def run_live_recording_mode(config: dict, settings: dict):
 
     st.markdown("---")
 
+    # Ground truth input
+    ground_truth_text = st.text_area(
+        "Ground Truth (paste expected transcript for evaluation)",
+        value="",
+        height=100,
+        placeholder="Paste the reference transcript here to compute WER / CER against each model…",
+        key="live_ground_truth",
+    )
+
     # Mic input
     audio_bytes = st.audio_input(
         "Click to record, click again to stop (mute/unmute)",
@@ -832,7 +841,7 @@ def run_live_recording_mode(config: dict, settings: dict):
 
     # Process new recording
     if audio_bytes is not None:
-        _process_live_recording(audio_bytes, config, settings)
+        _process_live_recording(audio_bytes, config, settings, ground_truth_text.strip())
 
     # Session log
     st.markdown("---")
@@ -870,7 +879,7 @@ def _render_session_controls():
             st.rerun()
 
 
-def _process_live_recording(audio_bytes, config: dict, settings: dict):
+def _process_live_recording(audio_bytes, config: dict, settings: dict, ground_truth: str = ""):
     """Process a new recording through all selected models."""
 
     # Initialize session on first recording
@@ -957,6 +966,7 @@ def _process_live_recording(audio_bytes, config: dict, settings: dict):
         "duration": duration,
         "audio_bytes": raw,
         "results": results,
+        "ground_truth": ground_truth,
     }
     st.session_state.live_recordings.append(recording_entry)
 
@@ -974,6 +984,7 @@ def _render_latest_results(recording_entry: dict):
     """Side-by-side transcript columns for a recording."""
     results = recording_entry.get("results", [])
     valid = [r for r in results if not r.error]
+    ground_truth = recording_entry.get("ground_truth", "")
 
     if not valid:
         if results:
@@ -989,6 +1000,81 @@ def _render_latest_results(recording_entry: dict):
     cols = st.columns(min(len(valid), 3))
     for i, result in enumerate(valid):
         render_transcript_column(result, cols[i % len(cols)])
+
+    # WER evaluation against ground truth
+    if ground_truth:
+        _render_wer_evaluation(valid, ground_truth)
+
+
+def _render_wer_evaluation(results: list[TranscriptionResult], ground_truth: str):
+    """Render WER/CER evaluation table and chart for live recording results."""
+    st.markdown("---")
+    st.subheader("📊 Evaluation vs Ground Truth")
+
+    # Show the ground truth text
+    with st.expander("Reference text", expanded=False):
+        st.text(ground_truth)
+
+    # Build WER table
+    wer_rows = []
+    chart_data = []
+    for result in results:
+        wer_result = calculate_wer_arabic(ground_truth, result.text)
+        wer_rows.append(
+            {
+                "Model": result.model_name,
+                "WER": f"{wer_result.wer_overall:.2%}",
+                "CER": f"{wer_result.cer_overall:.2%}",
+                "WER (Arabic)": (
+                    f"{wer_result.wer_arabic:.2%}"
+                    if wer_result.wer_arabic is not None
+                    else "—"
+                ),
+                "WER (English)": (
+                    f"{wer_result.wer_english:.2%}"
+                    if wer_result.wer_english is not None
+                    else "—"
+                ),
+                "Ref Words": wer_result.reference_word_count,
+                "Hyp Words": wer_result.hypothesis_word_count,
+            }
+        )
+        chart_data.append({"Model": result.model_name, "Metric": "WER", "Value": wer_result.wer_overall})
+        chart_data.append({"Model": result.model_name, "Metric": "CER", "Value": wer_result.cer_overall})
+        if wer_result.wer_arabic is not None:
+            chart_data.append({"Model": result.model_name, "Metric": "WER (Arabic)", "Value": wer_result.wer_arabic})
+        if wer_result.wer_english is not None:
+            chart_data.append({"Model": result.model_name, "Metric": "WER (English)", "Value": wer_result.wer_english})
+
+    st.dataframe(pd.DataFrame(wer_rows), use_container_width=True, hide_index=True)
+
+    # Bar chart
+    if chart_data:
+        fig = px.bar(
+            pd.DataFrame(chart_data),
+            x="Model",
+            y="Value",
+            color="Metric",
+            barmode="group",
+            title="Error Rate Comparison",
+            labels={"Value": "Error Rate"},
+        )
+        fig.update_layout(yaxis_tickformat=".0%")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Detailed diff per model
+    with st.expander("Detailed text comparison", expanded=False):
+        for result in results:
+            wer_result = calculate_wer_arabic(ground_truth, result.text)
+            st.markdown(f"**{result.model_name}** — WER: {wer_result.wer_overall:.2%}")
+            diff_col1, diff_col2 = st.columns(2)
+            with diff_col1:
+                st.caption("Reference (normalized)")
+                st.text(wer_result.reference_text[:500])
+            with diff_col2:
+                st.caption("Hypothesis (normalized)")
+                st.text(wer_result.hypothesis_text[:500])
+            st.markdown("---")
 
 
 def _render_session_log():
@@ -1025,13 +1111,19 @@ def _render_session_log():
                 st.audio(rec["audio_bytes"], format="audio/wav")
 
             valid = [r for r in rec.get("results", []) if not r.error]
+            gt = rec.get("ground_truth", "")
             if valid:
                 log_cols = st.columns(min(len(valid), 3))
                 for i, result in enumerate(valid):
                     with log_cols[i % len(log_cols)]:
                         st.markdown(f"**{result.model_name}**")
                         st.caption(f"Time: {result.processing_time_seconds:.1f}s")
+                        if gt:
+                            w = calculate_wer_arabic(gt, result.text)
+                            st.caption(f"WER: {w.wer_overall:.2%}  |  CER: {w.cer_overall:.2%}")
                         st.text(result.text[:300])
+            if gt:
+                st.caption(f"**Ground Truth:** {gt[:200]}")
 
 
 def _render_session_export(settings: dict):
@@ -1087,14 +1179,16 @@ def _build_session_json(recordings: list, settings: dict) -> dict:
     }
 
     for rec in recordings:
+        gt = rec.get("ground_truth", "")
         entry = {
             "index": rec["index"],
             "timestamp": rec["timestamp"],
             "duration_seconds": rec["duration"],
+            "ground_truth": gt,
             "transcripts": {},
         }
         for result in rec.get("results", []):
-            entry["transcripts"][result.model_name] = {
+            transcript_entry = {
                 "text": result.text,
                 "processing_time_seconds": round(result.processing_time_seconds, 2),
                 "rtf": round(result.rtf, 4) if result.rtf else None,
@@ -1110,6 +1204,16 @@ def _build_session_json(recordings: list, settings: dict) -> dict:
                     for s in result.segments
                 ],
             }
+            # Include WER/CER if ground truth was provided
+            if gt and result.text and not result.error:
+                w = calculate_wer_arabic(gt, result.text)
+                transcript_entry["evaluation"] = {
+                    "wer": round(w.wer_overall, 4),
+                    "cer": round(w.cer_overall, 4),
+                    "wer_arabic": round(w.wer_arabic, 4) if w.wer_arabic is not None else None,
+                    "wer_english": round(w.wer_english, 4) if w.wer_english is not None else None,
+                }
+            entry["transcripts"][result.model_name] = transcript_entry
         session["recordings"].append(entry)
 
     return session
